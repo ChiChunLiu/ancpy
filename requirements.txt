@@ -1,0 +1,8 @@
+cython
+matplotlib
+numpy
+pandas
+pysam
+scipy
+seaborn
+sklearn

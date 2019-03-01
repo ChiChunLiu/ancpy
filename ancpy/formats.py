@@ -6,7 +6,7 @@ import sys
 import itertools as it
 import pandas as pd
 import numpy as np
-import pysam
+#import pysam
 
 
 class Genotypes(object):
@@ -55,7 +55,7 @@ class Genotypes(object):
         dictionary of strand ambiguous alleles 
         combinations as keys and bools as values
     """
-    def __init__(self, Y=None, snp_df=None, inds=None):
+    def __init__(self, Y=None, snp_df=None, inds=None, clst = None, build='hg19'):
 
         # p x n genotype matrix
         self.Y = Y
@@ -65,7 +65,12 @@ class Genotypes(object):
         
         # list of individual ids
         self.inds = inds
+        
+        # individual information
+        self.clst = clst
 
+        # 
+        self.build = build
         # below is adapted from 
         # https://github.com/bulik/ldsc/blob/master/munge_sumstats.py
 
@@ -107,9 +112,25 @@ class Genotypes(object):
         # compute allele frequencies at each SNP
         f = np.nansum(self.Y, axis=1) / (2 * self.n)
 
-        # get the indicies of SNPs that dont pass the thresh
+        # get the indices of SNPs that dont pass the thresh
         idx = np.where((f >= eps) & (f <= (1. - eps)))[0]
         
+        return(idx)
+    
+    def filter_bad_snps(self, eps):
+        """Removes SNPs with too many missing
+        entries
+        Arguments
+        ---------
+        eps : float
+            frequency threshold eps
+        """
+        # compute allele frequencies at each SNP
+        f = np.isnan(self.Y).sum(axis = 1) / self.Y.shape[1]
+
+        # get the indices of SNPs that dont pass the thresh
+        idx = np.where(f <= eps)[0]
+
         return(idx)
 
     def remove_strand_ambiguous_alleles(self):
@@ -127,23 +148,29 @@ class Genotypes(object):
 
         return(idx)
     
-    def binarize(self):
+    def binarize(self, scheme = '02'):
         """Convert genotype data to binary
-        by mapping 2->1, 0->0 and randomly 
-        selecting a 0 or 1 for heterozygotes.
+        by mapping 2->1 (2), 0->0 and randomly 
+        selecting a 0 or 1 (2) for heterozygotes.
         This emulates the read sampled data found
         in ancient DNA studies
         """
         # randomly sample hets
         p_het = np.sum(self.Y[self.Y == 1.])
-        if p_het > 0:
-            samps = np.random.binomial(1, .5, int(p_het)).astype(np.float32) 
-            np.place(self.Y, self.y == 1., samps)
-
+        if scheme == '02':
+            if p_het > 0:
+                samps = np.random.binomial(1, .5, int(p_het)).astype(np.float32) 
+                np.place(self.Y, self.y == 1., samps)
+        
+        if scheme == '01':
+            if p_het > 0:
+                samps = np.random.binomial(1, .5, int(p_het)).astype(np.float32) 
+                np.place(self.Y, self.y == 1., samps)
         # set 2s to 1s
         self.Y[self.Y == 2.] = 1.
+        
 
-    def normalize(self, scale, impute):
+    def normalize(self, scale, impute = True):
         """Mean center the data so each snp has mean 0. 
         If scale true then scale each SNP to have var 1. 
         If impute is true it sets missing sites to 0. i.e. 
@@ -193,7 +220,49 @@ class Genotypes(object):
         
         """
         pass
+    
+    def merge(self, gt_obj, remove_ambiguous = False):
+        
+        # check reference genome builds
+        builds = set([g.build for g in Genotypes])
+        if len(builds) > 1:
+               raise ValueError('Objects are of different builds')
 
+        # get unique positions in any object
+        #unique_ids = []
+        #for g in Genotypes:
+        #    unique_ids.extend(g.CHROM.astype(str) + g.POS.astype(str))
+        #unique_ids = list(set(unique_ids))
+    
+        # concat ind list and cluster
+        new_clst = self.clst.append(gt_obj.clst, ignore_index=True)
+        new_inds = self.inds + gt_obj.inds
+        
+        # outer join snp dataframes and keep both indices
+        new_snp_df = self.snp_df.reset_index().merge(gt_obj.snp_df.reset_index(),
+                                        on = ['CHROM', 'POS'],
+                                        how="outer")
+        idx = new_snp_df[['index_x', 'index_y']]
+        
+        new_snp_df = new_snp_df[['SNP_x', 'CHROM', 'CM_POS_x', 'POS', 'A1_x', 'A2_x']].copy()
+        new_snp_df.columns = ['SNP', 'CHROM', 'CM_POS', 'POS', 'A1', 'A2']
+        # deal with strand-flip
+        
+        
+        # concat geno
+        
+        return Genotypes(Y=None, snp_df=new_snp_df, inds=new_inds, clst=new_clst)
+
+    def write_eigenstrat(self, prefix):
+        """
+        To do: write object to ind snp geno files
+        """
+        pass
+    def write_vcf(self, prefix):
+        """
+        To do: write object to a vcf file
+        """
+        pass
 
 class AncestryMap(Genotypes):
     """A class for the eigenstrat genotype format
@@ -232,15 +301,21 @@ class AncestryMap(Genotypes):
         # path to eigenstrat snp file
         self.snp_path = "{}.snp".format(self.prefix)
 
+        # path to eigenstart geno file
+        self.packed_geno_path = "{}.packedancestrymapgeno".format(self.prefix)
+        
     def _get_snp_dataframe(self):
         """Gets snp level dataframe stored as 
         pandas DataFrame
         """
         # read into pandas df
-        self.snp_df = pd.read_table(self.snp_path, header=None,
-                                    delim_whitespace=True)
+        self.snp_df = pd.read_csv(self.snp_path, header=None,
+                                    sep = '\t')
         
         # check if the dataframe has 6 columns
+        if self.snp_df.shape[1] < 6:
+             self.snp_df = pd.read_csv(self.snp_path, header=None,
+                                    sep = '\s+')
         if self.snp_df.shape[1] < 6:
             raise ValueError("{}.snp must have 6 cols".format(self.snp_path))
         
@@ -254,13 +329,18 @@ class AncestryMap(Genotypes):
         """Get list of individual ids
         """
         ind_df = pd.read_table(self.ind_path, header=None,
-                               delim_whitespace=True, delimiter="\t")
+                               sep = '\t')
         
         # check if the dataframe has 6 columns
+        if ind_df.shape[1] < 3:
+            ind_df = pd.read_table(self.ind_path, header=None,
+                               sep = '\s+')
         if ind_df.shape[1] < 3:
             raise ValueError("{}.ind must have 3 cols".format(self.ind_path))
 
         ind_df.columns = ["IND", "SEX", "CLST"]
+        
+        self.clst = ind_df
         self.inds = ind_df["IND"].tolist()
         
         # number of inds
@@ -301,7 +381,7 @@ class PackedAncestryMap(AncestryMap):
         rlen = max(48, int(np.ceil(self.n * 2 / 8)))
 
         # read in binary 
-        self.Y = np.fromfile(self.geno_path, dtype='uint8')[rlen:]
+        self.Y = np.fromfile(self.packed_geno_path, dtype='uint8')[rlen:]
         self.Y.shape = (self.p, rlen)
 
         # unpack 
@@ -309,11 +389,10 @@ class PackedAncestryMap(AncestryMap):
         self.Y = 2 * self.Y[:, ::2] + self.Y[:, 1::2]
 
         # convert to float to allow missing data stored as nan
-        self.Y = self.Y.astype(np.float32)
+        self.Y = self.Y.astype(np.float)
 
-        # set missing data to nan
+        # set missing data to -1
         self.Y[self.Y == 3] = np.nan
-
 
 class UnpackedAncestryMap(AncestryMap):
     """Class for unpacked ancestry map eigenstrat format. The unpacked format's
@@ -351,7 +430,8 @@ class UnpackedAncestryMap(AncestryMap):
         ys = np.fromstring(matstr, dtype=np.int8) - 48
 
         # reshape to p x n matrix
-        self.Y = ys.reshape(self.p, self.n).astype(np.float32)
+        self.Y = ys.reshape(self.p, self.n).astype(np.float)
 
         # replace 9s with nans
         self.Y[self.Y == 9] = np.nan
+
